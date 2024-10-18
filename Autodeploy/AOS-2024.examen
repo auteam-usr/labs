@@ -1,0 +1,87 @@
+#!/bin/bash
+
+rtrl=100
+srvl=101
+adminpc=102
+
+echo "---------------Hostname---------------"
+qm guest exec $rtrl -- bash -c "hostnamectl set-hostname rtr-l.au.team"
+qm guest exec $srvl -- bash -c "hostnamectl set-hostname l-srv.au.team"
+qm guest exec $adminpc -- bash -c "hostnamectl set-hostname admin-pc.au.team"
+
+echo "---------------Forwarding---------------"
+qm guest exec $rtrl -- bash -c "sed -i 's/net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/' /etc/net/sysctl.conf ; echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf ; sysctl -p"
+qm guest exec $srvl -- bash -c "sed -i 's/net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/' /etc/net/sysctl.conf ; echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf ; sysctl -p"
+qm guest exec $adminpc -- bash -c "sed -i 's/net.ipv4.ip_forward = 0/net.ipv4.ip_forward = 1/' /etc/net/sysctl.conf ; echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf ; sysctl -p"
+
+echo "---------------RTR-L_INTERFACES---------------"
+qm guest exec $rtrl -- bash -c "echo $'NM_CONTROLLED=yes\nDISABLED=no\nTYPE=eth\nCONFIG_WIRELESS=no\nBOOTPROTO=static\nSYSTEMD_BOOTPROTO=dhcp4\nCONFIG_IPV4=yes\nSYSTEMD_CONTROLLED=yes' > /etc/net/ifaces/ens19/options"
+qm guest exec $rtrl -- bash -c "cd /etc/net/ifaces ; rm -rf ens20 ; rm -rf ens21 ; mkdir ens20 ens21 ; cp ens19/options ens20/options ; cp ens19/options ens21/options ; echo '192.168.100.15/24' > ens19/ipv4address ; echo 'default via 192.168.100.1' > ens19/ipv4route ; echo '10.10.10.1/24' > ens20/ipv4address ; echo '20.20.20.1/24' > ens21/ipv4address ; rm -f ens19/resolv.conf ; echo 'nameserver 8.8.8.8' > /etc/resolv.conf ; cd ~"
+qm guest exec $rtrl --timeout 0 -- bash -c "systemctl restart network"
+
+echo "---------------SRV-L_INTERFACES---------------"
+qm guest exec $srvl -- bash -c "echo $'NM_CONTROLLED=yes\nDISABLED=no\nTYPE=eth\nCONFIG_WIRELESS=no\nBOOTPROTO=static\nSYSTEMD_BOOTPROTO=dhcp4\nCONFIG_IPV4=yes\nSYSTEMD_CONTROLLED=yes' > /etc/net/ifaces/ens19/options"
+qm guest exec $srvl -- bash -c "cd /etc/net/ifaces/ens19 ; echo '10.10.10.100/24' > ipv4address ; echo 'default via 10.10.10.1' > ipv4route ; cd ~"
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl restart network"
+
+echo "---------------ADMIN-PC_INTERFACES---------------"
+qm guest exec $adminpc -- bash -c "echo $'NM_CONTROLLED=yes\nDISABLED=no\nTYPE=eth\nCONFIG_WIRELESS=no\nBOOTPROTO=static\nSYSTEMD_BOOTPROTO=dhcp4\nCONFIG_IPV4=yes\nSYSTEMD_CONTROLLED=yes' > /etc/net/ifaces/ens19/options"
+qm guest exec $adminpc -- bash -c "cd /etc/net/ifaces/ens19 ; echo '20.20.20.150/24' > ipv4address ; echo 'default via 20.20.20.1' > ipv4route ; cd ~"
+qm guest exec $adminpc --timeout 0 -- bash -c "systemctl restart network"
+
+echo "---------------PACKAGES---------------"
+qm guest exec $rtrl --timeout 0 -- bash -c "systemctl restart network"
+qm guest exec $rtrl --timeout 0 -- bash -c "apt-get update"
+qm guest exec $rtrl --timeout 0 -- bash -c "apt-get install nftables -y"
+
+echo "---------------FIRST_TASK---------------"
+qm guest exec $rtrl -- bash -c "echo $'table inet nat {\n\tchain my_masquerade {\n\ttype nat hook postrouting priority srcnat;\n\toifname \"ens19\" masquerade\n\t}\n}' >> /etc/nftables/nftables.nft"
+qm guest exec $rtrl --timeout 0 -- bash -c "systemctl enable --now nftables"
+qm guest exec $rtrl --timeout 0 -- bash -c "systemctl restart nftables"
+
+echo "---------------DOWNLOAD_PACKAGES---------------"
+qm guest exec $rtrl --timeout 0 -- bash -c "apt-get install dhcp-server -y"
+qm guest exec $srvl -- bash -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl restart network"
+qm guest exec $srvl --timeout 0 -- bash -c "apt-get update"
+qm guest exec $srvl --timeout 0 -- bash -c "apt-get install alterator-fbi samba-dc alterator-net-domain task-samba-dc krb5-kdc -y"
+qm guest exec $adminpc -- bash -c "rm -f /etc/net/ifaces/ens19/resolv.conf"
+qm guest exec $adminpc -- bash -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+qm guest exec $adminpc --timeout 0 -- bash -c "systemctl restart network"
+qm guest exec $adminpc --timeout 0 -- bash -c "apt-get update"
+
+echo "---------------SECOND_TASK---------------"
+qm guest exec $rtrl -- bash -c "sed -i 's/DHCPDARGS=/DHCPDARGS=\"ens20 ens21\"/' /etc/sysconfig/dhcpd"
+
+mac_address_srvl=$(qm guest exec $srvl -- bash -c "ifconfig ens19 | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}'" | grep "out-data" | awk '{print $NF}' | sed 's/\\n//' | tr -d '"')
+
+mac_address_adminpc=$(qm guest exec $adminpc -- bash -c "ifconfig ens19 | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}'" | grep "out-data" | awk '{print $NF}' | sed 's/\\n//' | tr -d '"')
+
+qm guest exec $rtrl -- bash -c "echo $'ddns-update-style none;\n\nsubnet 10.10.10.0 netmask 255.255.255.0 {\n\toption routers\t10.10.10.1;\n\toption subnet-mask\t255.255.255.0;\n\n\toption domain-name\t\"au.team\";\n\toption domain-name-servers\t10.10.10.100, 8.8.8.8;\n\n\trange dynamic-bootp 10.10.10.100 10.10.10.120;\n}\nsubnet 20.20.20.0 netmask 255.55.255.0 {\n\toption routers\t20.20.20.1;\n\toption subnet-mask\t255.255.255.0;' > /etc/dhcp/dhcpd.conf"
+
+qm guest exec $rtrl -- bash -c "echo $'\n\toption domain-name\t\"au.team\";\n\toption domain-name-servers\t8.8.8.8;\n\n\trange dynamic-bootp 20.20.20.150 20.20.20.200;\n}\n\nhost l-srv {\n\thardware ethernet $mac_address_srvl;\n\tfixed-address 10.10.10.100;\n}\nhost admin-pc {\n\thardware ethernet $mac_address_adminpc;\n\toption domain-name-servers 10.10.10.100, 8.8.8.8;\n}' >> /etc/dhcp/dhcpd.conf"
+
+qm guest exec $rtrl --timeout 0 -- bash -c "systemctl enable --now dhcpd"
+qm guest exec $srvl -- bash -c "sed -i 's/BOOTPROTO=static/BOOTPROTO=dhcp/' /etc/net/ifaces/ens19/options"
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl restart network"
+qm guest exec $adminpc -- bash -c "sed -i 's/BOOTPROTO=static/BOOTPROTO=dhcp/' /etc/net/ifaces/ens19/options"
+qm guest exec $adminpc --timeout 0 -- bash -c "systemctl restart network"
+
+
+
+echo "---------------THIRD_TASK---------------"
+
+
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl enable --now alteratord ahttpd"
+qm guest exec $srvl -- bash -c "rm -f /etc/samba/smb.conf ; rm -rf /var/lib/samba ; rm -rf /var/cache/samba ; mkdir -p /var/lib/samba/sysvol"
+qm guest exec $srvl --timeout 0 -- bash -c 'samba-tool domain provision --realm=au.team --domain=AU --adminpass="Pa$$word" --dns-backend=SAMBA_INTERNAL --server-role=dc --use-rfc2307 --option="dns forwarder=8.8.8.8"'
+
+
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl enable --now samba"
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl enable --now smb"
+qm guest exec $srvl --timeout 0 -- bash -c "systemctl restart samba"
+
+qm guest exec $srvl -- bash -c "touch /root/users.sh ; chmod 777 /root/users.sh ; echo $'#!/bin/bash\n\nfor i in {1..15}; do\n\tsamba-tool user create user\${i}.user1 \"Pa\$\$word\"\n\tsamba-tool group addmembers left user\${i}.user1\ndone\n\nfor i in {1..5}; do\n\tsamba-tool user create user\${i}.admin \"Pa\$\$word\"\n\tsamba-tool group addmembers admin user\${i}.admin\ndone' > /root/users.sh"
+
+qm guest exec $srvl -- bash -c "sh /root/users.sh"
+

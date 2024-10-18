@@ -1,0 +1,1 @@
+# AltLinux Lab Work
